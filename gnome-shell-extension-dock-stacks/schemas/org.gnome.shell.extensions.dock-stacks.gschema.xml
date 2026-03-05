@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.dock-stacks" path="/org/gnome/shell/extensions/dock-stacks/">
+    <key name="grid-mode" type="s">
+      <choices>
+        <choice value="auto"/>
+        <choice value="always"/>
+        <choice value="never"/>
+      </choices>
+      <default>'auto'</default>
+      <summary>Grid layout mode</summary>
+      <description>When to use grid layout instead of fan: auto (based on threshold), always, or never.</description>
+    </key>
+    <key name="fan-threshold" type="i">
+      <default>12</default>
+      <range min="8" max="20" />
+      <summary>Fan threshold</summary>
+      <description>Maximum number of items to show in fan view before switching to grid (if grid-mode is auto).</description>
+    </key>
+    <key name="configured-folders" type="as">
+      <default>[]</default>
+      <summary>Configured Folders for Stacks</summary>
+      <description>List of absolute folder paths that will be pinned to the dock as Stacks.</description>
+    </key>
+    <key name="panic-reset" type="b">
+      <default>false</default>
+      <summary>Reset to safe state</summary>
+      <description>Trigger an emergency reset.</description>
+    </key>
+  </schema>
+</schemalist>
