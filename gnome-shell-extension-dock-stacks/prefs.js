@@ -42,7 +42,8 @@ export default class DockStacksPreferences extends ExtensionPreferences {
         const gridModeRow = new Adw.ComboRow({
             title: _('Grid Layout Mode'),
             subtitle: _('When to show grid instead of fan'),
-            model: gridModeModel
+            model: gridModeModel,
+            expression: new Gtk.PropertyExpression(StringObject, null, 'string')
         });
 
         let initialGridMode = settings.get_string('grid-mode');

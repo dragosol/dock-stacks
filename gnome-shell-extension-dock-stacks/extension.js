@@ -3,7 +3,6 @@ import Gio from 'gi://Gio';
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
-import Gtk from 'gi://Gtk';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Dash from 'resource:///org/gnome/shell/ui/dash.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -158,20 +157,24 @@ class StackPopup extends St.Widget {
         const curveDirection = originX < (global.stage.width / 2) ? 1 : -1;
 
         for (const data of displayItems) {
-            const iconWidget = new St.Icon({
-                gicon: data.icon,
-                icon_size: 48,
-                style_class: 'stack-item-icon'
-            });
+            let iconWidget;
 
-            if (data.isImage) {
-                // Apply a frame around image thumbnails exactly like Nautilus
-                iconWidget.set_style('border: 3px solid #ffffff; border-radius: 4px; background-color: #ffffff; box-shadow: 0px 4px 6px rgba(0,0,0,0.6); padding: 0;');
-            } else if (data.isAction) {
-                // Apply ONLY the drop shadow, no circular background
-                iconWidget.set_style('icon-shadow: 0px 4px 6px rgba(0,0,0,0.6);');
+            if (data.isImage && data.imageUri) {
+                iconWidget = new St.Widget({
+                    style: `background-image: url("${data.imageUri}"); background-size: cover; background-position: center; border-radius: 4px; border: 3px solid #ffffff; box-shadow: 0px 4px 6px rgba(0,0,0,0.6); width: 48px; height: 48px; margin: 0;`
+                });
             } else {
-                iconWidget.set_style('border-radius: 4px; icon-shadow: 0px 4px 6px rgba(0,0,0,0.6);');
+                iconWidget = new St.Icon({
+                    gicon: data.icon,
+                    icon_size: 48,
+                    style_class: 'stack-item-icon'
+                });
+
+                if (data.isAction) {
+                    iconWidget.set_style('icon-shadow: 0px 4px 6px rgba(0,0,0,0.6);');
+                } else {
+                    iconWidget.set_style('border-radius: 4px; icon-shadow: 0px 4px 6px rgba(0,0,0,0.6);');
+                }
             }
 
             const labelWidget = new St.Label({
@@ -291,6 +294,9 @@ class StackPopup extends St.Widget {
         this._keyPressId = global.stage.connect('captured-event', (actor, event) => {
             if (event.type() !== Clutter.EventType.KEY_PRESS) return Clutter.EVENT_PROPAGATE;
 
+            // If Sushi is actively rendering above us, surrender keyboard intercepts to it!
+            if (this._sushiWasOpen) return Clutter.EVENT_PROPAGATE;
+
             if (event.get_key_symbol() === Clutter.KEY_space) {
                 const children = this._fanContainer.get_children();
                 const [mx, my] = global.get_pointer();
@@ -406,59 +412,67 @@ class GridPopup extends St.Widget {
         this._isOpen = false;
         this._items = [];
         this._renderedWidgets = [];
+        this._mousePosAtLastType = null;
 
         // Base container for the rounded popover bubble
-        this._container = new St.BoxLayout({
-            vertical: true,
-            style: 'background-color: rgba(30, 30, 30, 0.95); border-radius: 24px; padding: 16px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0px 10px 30px rgba(0,0,0,0.8);'
+        // We use BinLayout so the search entry floating on top of the scrollview!
+        this._container = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            style: 'background-color: rgba(30, 30, 30, 0.9); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); width: 480px; height: 600px;'
         });
 
         // Search Entry for Filtering
         this._searchEntry = new St.Entry({
             hint_text: 'Type to filter...',
-            style_class: 'search-entry',
-            style: 'border-radius: 12px; padding: 6px 12px; margin-bottom: 16px; background-color: rgba(255,255,255,0.1); color: white; width: 400px;'
+            x_expand: true,
+            style: 'border-radius: 6px; padding: 8px 12px; background-color: rgba(45, 45, 45, 1.0); border: 1px solid rgba(255,255,255,0.05); color: white; box-shadow: 0px 4px 12px rgba(0,0,0,0.25);'
         });
 
+        this._searchWrapper = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            y_expand: true,
+            x_align: Clutter.ActorAlign.FILL,
+            y_align: Clutter.ActorAlign.START,
+            style: 'margin: 16px 16px 0px 16px;'
+        });
+        this._searchWrapper.add_child(this._searchEntry);
+
         this._searchEntry.clutter_text.connect('text-changed', () => {
+            this._mousePosAtLastType = global.get_pointer();
             this._filterGrid(this._searchEntry.get_text());
         });
 
-        this._container.add_child(this._searchEntry);
-
-        // Flow Layout for the Grid
-        const flowLayout = new Clutter.FlowLayout({
-            orientation: Clutter.Orientation.HORIZONTAL,
-            column_spacing: 12,
-            row_spacing: 12,
-            homogeneous: true
-        });
-
         this._scrollView = new St.ScrollView({
-            hscrollbar_policy: Gtk.PolicyType.NEVER,
-            vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.NEVER, // Remove scrollbar altogether as requested
             enable_mouse_scrolling: true,
-            style: 'width: 440px; min-height: 200px; max-height: 500px;'
+            x_expand: true,
+            y_expand: true,
+            style: 'margin: 0px;' // Let items extend flush to the top/bottom container boundaries
         });
 
-        this._gridContainer = new St.BoxLayout({
-            vertical: false,
-            layout_manager: flowLayout,
+        this._gridContainer = new St.Widget({
             style: 'padding: 8px;'
         });
 
-        this._scrollView.set_child(this._gridContainer);
+        // Wrapper to satisfy St.Scrollable interface requirement in GNOME 47
+        this._scrollWrapper = new St.BoxLayout({
+            vertical: true,
+            x_expand: false,
+            y_expand: false
+        });
+        this._scrollWrapper.add_child(this._gridContainer);
+
+        this._scrollView.set_child(this._scrollWrapper);
+
+        // Z-Index ordering: ScrollView underneath, Search Entry floating on top
         this._container.add_child(this._scrollView);
+        this._container.add_child(this._searchWrapper);
 
         this.add_child(this._container);
 
-        // Dismiss when clicking outside
-        this.connect('button-press-event', (actor, event) => {
-            if (!this._container.contains(event.get_source())) {
-                this.close();
-            }
-            return Clutter.EVENT_PROPAGATE;
-        });
+        // We now handle global dismissal in the captured-event block for absolute reliability
     }
 
     open(itemsData) {
@@ -543,9 +557,14 @@ class GridPopup extends St.Widget {
             const destX = originX - (natW / 2);
             const destY = originY - natH - 24;
 
-            this._container.set_position(destX, originY);
+            // Sprout from the absolute center of the dock icon!
+            const dockCenterY = originY + (sourceH / 2);
+            const startX = originX - (natW / 2);
+            const startY = dockCenterY - natH;
+
+            this._container.set_position(startX, startY);
             this._container.set_opacity(0);
-            this._container.set_scale(0.8, 0.8);
+            this._container.set_scale(0.1, 0.1); // Sprout from nothing like the Fan
             this._container.set_pivot_point(0.5, 1.0);
 
             this._container.ease({
@@ -554,7 +573,7 @@ class GridPopup extends St.Widget {
                 scale_x: 1,
                 scale_y: 1,
                 opacity: 255,
-                duration: 200,
+                duration: 200, // Sync with Fan burst duration
                 mode: Clutter.AnimationMode.EASE_OUT_CUBIC
             });
 
@@ -563,18 +582,29 @@ class GridPopup extends St.Widget {
 
         // Construct grid widgets
         this._items.forEach((data, index) => {
-            const iconWidget = new St.Icon({
-                gicon: data.icon,
-                icon_size: 64,
-                style_class: 'stack-item-icon'
-            });
+            let iconWidget;
 
-            if (data.isImage) {
-                iconWidget.set_style('border: 3px solid #ffffff; border-radius: 4px; background-color: #ffffff; box-shadow: 0px 4px 6px rgba(0,0,0,0.6); padding: 0;');
-            } else if (data.isAction) {
-                iconWidget.set_style('icon-shadow: 0px 4px 6px rgba(0,0,0,0.6);');
+            if (data.isImage && data.imageUri) {
+                // We render the background image tightly inside a clean St.Bin.
+                const img = new St.Widget({
+                    style: `background-image: url("${data.imageUri}"); background-size: cover; background-position: center; border-radius: 4px; border: 3px solid #ffffff; width: 64px; height: 64px; margin: 0;`
+                });
+                iconWidget = new St.Bin({
+                    child: img,
+                    style: 'border-radius: 6px; padding: 0;' // Shadow removed as requested
+                });
             } else {
-                iconWidget.set_style('border-radius: 4px; icon-shadow: 0px 4px 6px rgba(0,0,0,0.6);');
+                iconWidget = new St.Icon({
+                    gicon: data.icon,
+                    icon_size: 64,
+                    style_class: 'stack-item-icon'
+                });
+
+                if (data.isAction) {
+                    iconWidget.set_style(''); // Shadow removed
+                } else {
+                    iconWidget.set_style('border-radius: 4px;'); // Shadow removed
+                }
             }
 
             const nameBox = new St.BoxLayout({ vertical: true });
@@ -609,6 +639,7 @@ class GridPopup extends St.Widget {
 
             itemContainer._data = data; // Stash for filtering
             itemContainer.hoverTargetScale = 1.05;
+            itemContainer.set_opacity(0); // Hide initially for cascade animation
 
             itemContainer.connect('notify::hover', () => {
                 const targetScale = itemContainer.hover ? itemContainer.hoverTargetScale : 1.0;
@@ -620,11 +651,9 @@ class GridPopup extends St.Widget {
                     mode: Clutter.AnimationMode.EASE_OUT_QUAD
                 });
 
-                // When hovered, pull focus from search bar so Spacebar doesn't type spaces into the bar
-                if (itemContainer.hover) {
+                // Only steal focus if the mouse is actively moving, not when layout reshuffles under it
+                if (itemContainer.hover && !this._mousePosAtLastType) {
                     this.grab_key_focus();
-                } else {
-                    this._searchEntry.grab_key_focus();
                 }
             });
 
@@ -645,24 +674,55 @@ class GridPopup extends St.Widget {
             this._gridContainer.add_child(itemContainer);
         });
 
-        // Map global captured events for Spacebar to trigger GNOME Sushi
+        // Map global captured events for Spacebar to trigger GNOME Sushi and outside-clicks to dismiss
         this._keyPressId = global.stage.connect('captured-event', (actor, event) => {
-            if (event.type() !== Clutter.EventType.KEY_PRESS) return Clutter.EVENT_PROPAGATE;
+            const type = event.type();
 
-            // Do not intercept if actively typing in the search bar, unless it's Esc/Enter maybe
-            if (global.stage.get_key_focus() === this._searchEntry.clutter_text) {
-                // If they press Escape while in search, clear search or close
-                if (event.get_key_symbol() === Clutter.KEY_Escape) {
-                    if (this._searchEntry.get_text() !== '') {
-                        this._searchEntry.set_text('');
-                        return Clutter.EVENT_STOP;
-                    } else {
-                        this.close();
-                        return Clutter.EVENT_STOP;
+            if (type === Clutter.EventType.BUTTON_PRESS || type === Clutter.EventType.TOUCH_BEGIN) {
+                const [x, y] = event.get_coords();
+                const [cx, cy] = this._container.get_transformed_position();
+                const [cw, ch] = this._container.get_transformed_size();
+
+                if (x < cx || x > cx + cw || y < cy || y > cy + ch) {
+                    // Check if they clicked the source dock icon. If so, let its 'clicked' handler do the toggling!
+                    if (this.sourceIcon && this.sourceIcon.button) {
+                        const [sx, sy] = this.sourceIcon.button.get_transformed_position();
+                        const [sw, sh] = this.sourceIcon.button.get_transformed_size();
+                        if (x >= sx && x <= sx + sw && y >= sy && y <= sy + sh) {
+                            return Clutter.EVENT_PROPAGATE;
+                        }
+                    }
+
+                    this.close();
+                    return Clutter.EVENT_PROPAGATE; // Do not gobble the click so they can click the dock seamlessly
+                }
+            }
+
+            if (type === Clutter.EventType.MOTION) {
+                if (this._mousePosAtLastType) {
+                    const [x, y] = event.get_coords();
+                    const dx = x - this._mousePosAtLastType[0];
+                    const dy = y - this._mousePosAtLastType[1];
+                    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+                        this._mousePosAtLastType = null;
+
+                        // If we are currently hovering over an item, grab focus so spacebar works
+                        const children = this._gridContainer.get_children();
+                        for (let i = 0; i < children.length; i++) {
+                            if (children[i].hover) {
+                                this.grab_key_focus();
+                                break;
+                            }
+                        }
                     }
                 }
                 return Clutter.EVENT_PROPAGATE;
             }
+
+            if (type !== Clutter.EventType.KEY_PRESS) return Clutter.EVENT_PROPAGATE;
+
+            // If Sushi is actively rendering above us, surrender keyboard intercepts to it!
+            if (this._sushiWasOpen) return Clutter.EVENT_PROPAGATE;
 
             if (event.get_key_symbol() === Clutter.KEY_space) {
                 const children = this._gridContainer.get_children();
@@ -670,11 +730,11 @@ class GridPopup extends St.Widget {
 
                 for (let i = 0; i < children.length; i++) {
                     const child = children[i];
-
                     const [_, x, y] = child.get_transformed_position();
                     const [__, w, h] = child.get_transformed_size();
                     const isHovered = child.hover || (mx >= x && mx <= x + w && my >= y && my <= y + h);
 
+                    // First, evaluate if we can trigger Sushi for the current hover target
                     if (isHovered) {
                         const data = child._data;
                         if (data && !data.isAction && data.uri) {
@@ -698,25 +758,92 @@ class GridPopup extends St.Widget {
                         return Clutter.EVENT_STOP;
                     }
                 }
-            } else if (event.get_key_symbol() === Clutter.KEY_Escape) {
+            }
+
+            // Bind Ctrl+F to force focus back into the search bar seamlessly
+            const isCtrl = (event.get_state() & Clutter.ModifierType.CONTROL_MASK) !== 0;
+            if (isCtrl && event.get_key_symbol() === Clutter.KEY_f) {
+                this._mousePosAtLastType = global.get_pointer();
+                this._searchEntry.grab_key_focus();
+                return Clutter.EVENT_STOP;
+            }
+
+            // Only AFTER verifying we didn't want to Sushi-preview an item, process the search bar text inputs
+            if (global.stage.get_key_focus() === this._searchEntry.clutter_text) {
+                if (event.get_key_symbol() === Clutter.KEY_Escape) {
+                    if (this._searchEntry.get_text() !== '') {
+                        this._searchEntry.set_text('');
+                        return Clutter.EVENT_STOP;
+                    } else {
+                        this.close();
+                        return Clutter.EVENT_STOP;
+                    }
+                }
+                return Clutter.EVENT_PROPAGATE;
+            }
+
+            if (event.get_key_symbol() === Clutter.KEY_Escape) {
                 this.close();
                 return Clutter.EVENT_STOP;
             }
 
             return Clutter.EVENT_PROPAGATE;
         });
+
+        // Initial Layout Pass
+        this._filterGrid('');
     }
 
     _filterGrid(term) {
         const lowerTerm = term.toLowerCase();
+        let visibleCount = 0;
+        const COLUMNS = 4;
+        const PADDING_X = 16;
+        const PADDING_Y = 72; // Massive top padding so icons start below the floating search bar
+        const PADDING_BOTTOM = 24;
+        const ITEM_W = 96;
+        const ITEM_H = 120;
+        const SPACING = 16;
+
         this._renderedWidgets.forEach(widget => {
             const show = widget._data.name.toLowerCase().includes(lowerTerm);
-            if (show && !widget.visible) {
+            if (show) {
                 widget.show();
-            } else if (!show && widget.visible) {
-                widget.hide();
+
+                const col = visibleCount % COLUMNS;
+                const row = Math.floor(visibleCount / COLUMNS);
+
+                const destX = PADDING_X + col * (ITEM_W + SPACING);
+                const destY = PADDING_Y + row * (ITEM_H + SPACING);
+
+                widget.ease({
+                    x: destX,
+                    y: destY,
+                    opacity: 255,
+                    duration: 150,
+                    mode: Clutter.AnimationMode.EASE_OUT_QUAD
+                });
+
+                visibleCount++;
+            } else {
+                if (widget.visible && widget.opacity > 0) {
+                    widget.ease({
+                        opacity: 0,
+                        duration: 100,
+                        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                        onComplete: () => widget.hide()
+                    });
+                } else {
+                    widget.hide();
+                }
             }
         });
+
+        // Explicitly expand container bounds so the ScrollView can track it seamlessly
+        const totalRows = Math.ceil(visibleCount / COLUMNS);
+        const totalHeight = PADDING_Y + PADDING_BOTTOM + totalRows * ITEM_H + Math.max(0, totalRows - 1) * SPACING;
+        this._gridContainer.set_height(Math.max(totalHeight, 10));
+        this._gridContainer.set_width(450);
     }
 
     close() {
@@ -770,7 +897,7 @@ class StackIconContainer extends St.Widget {
         return { isOpen: this._popup ? this._popup._isOpen : false };
     }
 
-    constructor(folderPath) {
+    constructor(folderPath, settings) {
         super({
             layout_manager: new Clutter.BinLayout(),
             style_class: 'dash-item-container',
@@ -780,7 +907,7 @@ class StackIconContainer extends St.Widget {
 
         this.folderPath = folderPath;
         this.folderName = folderPath.split('/').pop() || folderPath;
-        this._settings = Extension.lookupByURL(import.meta.url).getSettings('org.gnome.shell.extensions.dock-stacks');
+        this._settings = settings;
 
         this.button = new St.Button({
             style_class: 'app-well-app show-apps',
@@ -865,6 +992,7 @@ class StackIconContainer extends St.Widget {
                 let gicon = info.get_icon();
                 let isImage = false;
 
+                let imageUri = null;
                 if (contentType && contentType.startsWith('image/')) {
                     isImage = true;
                     // Try to get GNOME thumbnail
@@ -876,10 +1004,12 @@ class StackIconContainer extends St.Widget {
 
                     if (thumbFile && thumbFile.query_exists(null)) {
                         gicon = new Gio.FileIcon({ file: thumbFile });
+                        imageUri = thumbFile.get_uri();
                     } else {
                         // Use actual image file directly
                         const imageFile = file.get_child(info.get_name());
                         gicon = new Gio.FileIcon({ file: imageFile });
+                        imageUri = imageFile.get_uri();
                     }
                 }
 
@@ -888,6 +1018,7 @@ class StackIconContainer extends St.Widget {
                     icon: gicon || new Gio.ThemedIcon({ name: 'text-x-generic' }),
                     type: info.get_file_type(),
                     isImage: isImage,
+                    imageUri: imageUri,
                     uri: file.get_child(info.get_name()).get_uri(),
                     modified: info.get_attribute_uint64('time::modified') || 0
                 });
@@ -1032,7 +1163,7 @@ export default class DockStacksExtension extends Extension {
         const folders = this._settings.get_strv('configured-folders');
         for (const folder of folders) {
             try {
-                const stackIcon = new StackIconContainer(folder);
+                const stackIcon = new StackIconContainer(folder, this._settings);
                 this._stackIcons.push(stackIcon);
                 // Append it to dash container safely
                 if (this._dashBox) {
