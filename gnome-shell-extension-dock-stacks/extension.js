@@ -161,7 +161,7 @@ class StackPopup extends St.Widget {
 
             if (data.isImage && data.imageUri) {
                 iconWidget = new St.Widget({
-                    style: `background-image: url("${data.imageUri}"); background-size: cover; background-position: center; border-radius: 4px; border: 3px solid #ffffff; box-shadow: 0px 4px 6px rgba(0,0,0,0.6); width: 48px; height: 48px; margin: 0;`
+                    style: `background-image: url("${data.imageUri}"); background-size: cover; background-position: center; border-radius: 4px; border: 3px solid #ffffff; width: 48px; height: 48px; margin: 0;`
                 });
             } else {
                 iconWidget = new St.Icon({
@@ -171,9 +171,9 @@ class StackPopup extends St.Widget {
                 });
 
                 if (data.isAction) {
-                    iconWidget.set_style('icon-shadow: 0px 4px 6px rgba(0,0,0,0.6);');
+                    iconWidget.set_style('');
                 } else {
-                    iconWidget.set_style('border-radius: 4px; icon-shadow: 0px 4px 6px rgba(0,0,0,0.6);');
+                    iconWidget.set_style('border-radius: 4px;');
                 }
             }
 
