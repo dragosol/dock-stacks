@@ -102,12 +102,12 @@ function _handleFileDrop(data, dropX, dropY, modifiers) {
         return;
     }
 
-    // Check what's under the cursor
+    // Check what's under the cursor — iterate in reverse so the TOPMOST window wins
     const windowActors = global.get_window_actors();
     let targetWindow = null;
 
-    for (const actor of windowActors) {
-        const meta = actor.get_meta_window();
+    for (let i = windowActors.length - 1; i >= 0; i--) {
+        const meta = windowActors[i].get_meta_window();
         if (!meta || meta.is_hidden() || meta.minimized) continue;
 
         const rect = meta.get_frame_rect();
@@ -1490,52 +1490,78 @@ export default class DockStacksExtension extends Extension {
         this._dashBox = null;
         this._enableRetryId = null;
 
-        // The dash may not be ready immediately at login.
-        // Retry up to 20 times (10 seconds) until we can find _box.
-        let retries = 0;
-        const tryInit = () => {
-            try {
-                const box = Main.overview.dash._box;
-                if (box) this._dashBox = box;
-            } catch (e) {
-                this._dashBox = null;
-            }
+        // Wait 1.5s before injecting into the dash.
+        // Even if _box exists immediately, Dash-to-Dock and other dock extensions
+        // may not have finished initializing their layout yet.
+        // This delay is imperceptible but prevents icons from being silently dropped.
+        this._enableRetryId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
+            this._enableRetryId = null;
+            let retries = 0;
 
-            if (this._dashBox) {
-                console.log(`[Dock Stacks] Dash box found (attempt ${retries + 1}), syncing stacks.`);
-                this._enableRetryId = null;
-                this._syncStacks();
-                return false; // Stop GLib timer (GLib.SOURCE_REMOVE = false)
-            }
+            const trySync = () => {
+                try {
+                    const box = Main.overview.dash._box;
+                    if (box) this._dashBox = box;
+                } catch (e) {
+                    this._dashBox = null;
+                }
 
-            retries++;
-            if (retries >= 20) {
-                console.error(`[Dock Stacks] Could not find dash box after 20 attempts. Extension inactive.`);
-                this._enableRetryId = null;
+                if (this._dashBox) {
+                    console.log(`[Dock Stacks] Syncing stacks (startup retry ${retries}).`);
+                    this._syncStacks();
+                    return false; // GLib.SOURCE_REMOVE
+                }
+
+                retries++;
+                if (retries >= 15) {
+                    console.error(`[Dock Stacks] Dash unavailable after 15 retries.`);
+                    return false;
+                }
+                return true; // GLib.SOURCE_CONTINUE
+            };
+
+            // Try once now, then poll every 500ms if not ready
+            if (!trySync()) {
+                // trySync returned false = already found and synced
                 return false;
             }
-
-            return true; // Keep retrying (GLib.SOURCE_CONTINUE = true)
-        };
-
-        // Try immediately. If not found, set up a retry timer.
-        const foundImmediately = (this._dashBox !== null);
-        if (!foundImmediately) {
-            tryInit(); // First attempt
-        }
-
-        if (!this._dashBox) {
-            // Dash not found yet, schedule retries every 500ms
-            this._enableRetryId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, tryInit);
-        }
+            // Not found yet, keep polling
+            this._enableRetryId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, trySync);
+            return false; // Don't repeat the outer 1500ms timer
+        });
 
         this._settingsChangedId = this._settings.connect('changed::configured-folders', () => {
             this._syncStacks();
+        });
+
+        // Re-sync stacks when the GNOME overview opens.
+        // The overview dash may not have our icons if the dock extension re-initializes.
+        this._overviewShowingId = Main.overview.connect('showing', () => {
+            // Check if any of our icons are still in the box; re-sync if not
+            if (this._stackIcons.length > 0 && this._dashBox) {
+                const firstIcon = this._stackIcons[0];
+                if (!this._dashBox.contains(firstIcon)) {
+                    console.log('[Dock Stacks] Overview opened: icons missing from dash, re-syncing.');
+                    this._syncStacks();
+                }
+            }
         });
     }
 
     _syncStacks() {
         this._cleanStacks();
+
+        // Refresh the dash box reference — dock extensions may reinitialize it.
+        // Dash-to-Dock nests the inner dash: Main.overview.dash.dash._box
+        // Standard GNOME dash: Main.overview.dash._box
+        try {
+            this._dashBox =
+                Main.overview.dash.dash?._box ||
+                Main.overview.dash._box ||
+                this._dashBox; // keep existing ref as last resort
+        } catch (e) {
+            // _dashBox stays as-is
+        }
 
         const folders = this._settings.get_strv('configured-folders');
         for (const folder of folders) {
@@ -1570,6 +1596,11 @@ export default class DockStacksExtension extends Extension {
         if (this._enableRetryId) {
             GLib.source_remove(this._enableRetryId);
             this._enableRetryId = null;
+        }
+
+        if (this._overviewShowingId) {
+            Main.overview.disconnect(this._overviewShowingId);
+            this._overviewShowingId = null;
         }
 
         if (this._settingsChangedId) {
