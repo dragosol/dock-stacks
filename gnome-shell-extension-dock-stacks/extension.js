@@ -7,6 +7,333 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Dash from 'resource:///org/gnome/shell/ui/dash.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
+// ─── Drag & Drop Helpers ────────────────────────────────────────────────────
+
+/**
+ * Query Nautilus's current directory for a given MetaWindow via the
+ * org.freedesktop.FileManager1 D-Bus interface.
+ * Returns a string path (e.g. '/home/user/Downloads') or null.
+ */
+function _getNautilusDirectoryForWindow(metaWindow) {
+    // Try OpenWindowsWithLocations first (maps window object paths → location URIs)
+    try {
+        const result = Gio.DBus.session.call_sync(
+            'org.freedesktop.FileManager1',
+            '/org/freedesktop/FileManager1',
+            'org.freedesktop.DBus.Properties',
+            'Get',
+            new GLib.Variant('(ss)', ['org.freedesktop.FileManager1', 'OpenWindowsWithLocations']),
+            new GLib.VariantType('(v)'),
+            Gio.DBusCallFlags.NONE,
+            1000,
+            null
+        );
+
+        if (result) {
+            const variant = result.deep_unpack()[0];
+            const windowsMap = variant.deep_unpack(); // Dict: {string objectPath: [string uri, ...]}
+
+            // Just grab the first window's first location
+            for (const [_objPath, uris] of Object.entries(windowsMap)) {
+                if (uris && uris.length > 0) {
+                    const gfile = Gio.File.new_for_uri(uris[0]);
+                    const path = gfile.get_path();
+                    if (path) {
+                        console.log(`[Dock Stacks] Nautilus dir from OpenWindowsWithLocations: ${path}`);
+                        return path;
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.log(`[Dock Stacks] OpenWindowsWithLocations failed: ${e}`);
+    }
+
+    // Fallback to OpenLocations (flat array of all open URIs)
+    try {
+        const result = Gio.DBus.session.call_sync(
+            'org.freedesktop.FileManager1',
+            '/org/freedesktop/FileManager1',
+            'org.freedesktop.DBus.Properties',
+            'Get',
+            new GLib.Variant('(ss)', ['org.freedesktop.FileManager1', 'OpenLocations']),
+            new GLib.VariantType('(v)'),
+            Gio.DBusCallFlags.NONE,
+            1000,
+            null
+        );
+
+        if (result) {
+            const variant = result.deep_unpack()[0];
+            const locations = variant.deep_unpack();
+
+            if (locations && locations.length > 0) {
+                const gfile = Gio.File.new_for_uri(locations[0]);
+                const path = gfile.get_path();
+                if (path) {
+                    console.log(`[Dock Stacks] Nautilus dir from OpenLocations: ${path}`);
+                    return path;
+                }
+            }
+        }
+    } catch (e) {
+        console.log(`[Dock Stacks] OpenLocations failed: ${e}`);
+    }
+
+    return null;
+}
+
+/**
+ * Perform the file drop action based on where the cursor ended up.
+ * @param {object} data - The item data object with .uri, .name, etc.
+ * @param {number} dropX - Global X coordinate of the drop
+ * @param {number} dropY - Global Y coordinate of the drop
+ */
+function _handleFileDrop(data, dropX, dropY, modifiers) {
+    if (!data.uri) return;
+
+    // Hold Ctrl to copy instead of move (macOS-style: move is default)
+    const isCopy = !!(modifiers & Clutter.ModifierType.CONTROL_MASK);
+
+    // Get the file we're dragging
+    const sourceFile = Gio.File.new_for_uri(data.uri);
+    if (!sourceFile.query_exists(null)) {
+        console.error(`[Dock Stacks] Source file does not exist: ${data.uri}`);
+        return;
+    }
+
+    // Check what's under the cursor
+    const windowActors = global.get_window_actors();
+    let targetWindow = null;
+
+    for (const actor of windowActors) {
+        const meta = actor.get_meta_window();
+        if (!meta || meta.is_hidden() || meta.minimized) continue;
+
+        const rect = meta.get_frame_rect();
+        if (dropX >= rect.x && dropX <= rect.x + rect.width &&
+            dropY >= rect.y && dropY <= rect.y + rect.height) {
+            targetWindow = meta;
+            break;
+        }
+    }
+
+    if (!targetWindow) {
+        // No window under cursor → drop to Desktop
+        const desktopPath = GLib.get_home_dir() + '/Desktop';
+        const desktopDir = Gio.File.new_for_path(desktopPath);
+        if (!desktopDir.query_exists(null)) {
+            try {
+                desktopDir.make_directory_with_parents(null);
+            } catch (e) {
+                console.error(`[Dock Stacks] Failed to create Desktop dir: ${e}`);
+                return;
+            }
+        }
+        const destFile = desktopDir.get_child(sourceFile.get_basename());
+        try {
+            if (isCopy) {
+                sourceFile.copy(destFile, Gio.FileCopyFlags.NONE, null, null);
+                console.log(`[Dock Stacks] Copied ${data.name} to ~/Desktop/`);
+            } else {
+                sourceFile.move(destFile, Gio.FileCopyFlags.NONE, null, null);
+                console.log(`[Dock Stacks] Moved ${data.name} to ~/Desktop/`);
+            }
+        } catch (e) {
+            console.error(`[Dock Stacks] Failed to copy to Desktop: ${e}`);
+        }
+        return;
+    }
+
+    // Identify the target window using ALL available methods (Wayland often lacks WM_CLASS)
+    const wmClass = (targetWindow.get_wm_class() || '').toLowerCase();
+    let gtkAppId = '';
+    let sandboxId = '';
+    try { gtkAppId = (targetWindow.get_gtk_application_id() || '').toLowerCase(); } catch (e) { /* n/a */ }
+    try { sandboxId = (targetWindow.get_sandboxed_app_id() || '').toLowerCase(); } catch (e) { /* n/a */ }
+
+    console.log(`[Dock Stacks] Drop target — WM_CLASS: "${wmClass}", GTK_APP_ID: "${gtkAppId}", SANDBOX_ID: "${sandboxId}", title: "${targetWindow.get_title()}"`);
+
+    const isNautilus = wmClass.includes('nautilus') || wmClass.includes('files') ||
+        gtkAppId.includes('nautilus') || gtkAppId.includes('org.gnome.nautilus') ||
+        sandboxId.includes('nautilus');
+
+    if (isNautilus) {
+        const nautilusDir = _getNautilusDirectoryForWindow(targetWindow);
+        if (nautilusDir) {
+            const destDir = Gio.File.new_for_path(nautilusDir);
+            const destFile = destDir.get_child(sourceFile.get_basename());
+            try {
+                if (isCopy) {
+                    sourceFile.copy(destFile, Gio.FileCopyFlags.NONE, null, null);
+                    console.log(`[Dock Stacks] Copied ${data.name} to ${nautilusDir}`);
+                } else {
+                    sourceFile.move(destFile, Gio.FileCopyFlags.NONE, null, null);
+                    console.log(`[Dock Stacks] Moved ${data.name} to ${nautilusDir}`);
+                }
+            } catch (e) {
+                console.error(`[Dock Stacks] Failed to move to Nautilus dir: ${e}`);
+            }
+            return;
+        }
+        console.error(`[Dock Stacks] Could not determine Nautilus directory, cancelling drop.`);
+        return;
+    }
+
+    // Any other app → open the file with its default handler.
+    // This is the closest we can get to native DnD from the shell compositor:
+    // it opens the file as if you had double-clicked it / dragged it onto the app icon.
+    // True Wayland cross-process DnD (like uploading to a browser drop zone) is not
+    // technically possible from within the GNOME Shell compositor process.
+    try {
+        Gio.AppInfo.launch_default_for_uri(data.uri, null);
+        console.log(`[Dock Stacks] Opened ${data.name} with default handler`);
+    } catch (e) {
+        console.error(`[Dock Stacks] Failed to open ${data.name}: ${e}`);
+    }
+}
+
+/**
+ * Make an itemContainer manually draggable using raw captured events.
+ * St.Button internally consumes button-press-event, blocking Clutter.DragAction.
+ * So we track press→motion→release via global.stage captured-event instead.
+ *
+ * @param {St.Button} itemContainer - The container to make draggable
+ * @param {object} data - The item data (.uri, .name, .icon, etc.)
+ * @param {StackPopup|GridPopup} popup - The parent popup (to close on successful drop)
+ */
+function _setupDragAction(itemContainer, data, popup) {
+    // Don't make action items (like "Open in Files") draggable
+    if (data.isAction) return;
+
+    let pressX = 0, pressY = 0;
+    let isPressed = false;
+    let isDragging = false;
+    let dragClone = null;
+    let capturedEventId = null;
+
+    const DRAG_THRESHOLD = 12; // px before we consider it a drag
+
+    // Listen for button press on the item
+    itemContainer.connect('button-press-event', (actor, event) => {
+        if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE; // Left click only
+        [pressX, pressY] = event.get_coords();
+        isPressed = true;
+        isDragging = false;
+
+        // Attach a global captured-event listener to track motion/release
+        if (capturedEventId) {
+            global.stage.disconnect(capturedEventId);
+            capturedEventId = null;
+        }
+
+        capturedEventId = global.stage.connect('captured-event', (stage, ev) => {
+            const type = ev.type();
+
+            if (type === Clutter.EventType.MOTION) {
+                if (!isPressed) return Clutter.EVENT_PROPAGATE;
+
+                const [mx, my] = ev.get_coords();
+                const dx = mx - pressX;
+                const dy = my - pressY;
+
+                if (!isDragging && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+                    // Start the drag!
+                    isDragging = true;
+                    popup._isDragging = true;
+
+                    // Disable the fan's event blocker so button-release reaches underlying windows
+                    if (popup._eventBlocker) popup._eventBlocker.reactive = false;
+
+                    dragClone = new Clutter.Clone({
+                        source: itemContainer,
+                        opacity: 180,
+                    });
+                    // Position clone at item's current screen position
+                    const [ix, iy] = itemContainer.get_transformed_position();
+                    dragClone.set_position(ix, iy);
+                    Main.uiGroup.add_child(dragClone);
+
+                    // Dim the original
+                    itemContainer.set_opacity(80);
+                }
+
+                if (isDragging && dragClone) {
+                    // Move the clone to follow the cursor
+                    const [cloneW, cloneH] = [dragClone.width, dragClone.height];
+                    dragClone.set_position(mx - cloneW / 2, my - cloneH / 2);
+                    return Clutter.EVENT_STOP; // Consume motion during drag
+                }
+
+                return Clutter.EVENT_PROPAGATE;
+            }
+
+            if (type === Clutter.EventType.BUTTON_RELEASE) {
+                if (!isPressed) return Clutter.EVENT_PROPAGATE;
+
+                const wasDragging = isDragging;
+                const [releaseX, releaseY] = ev.get_coords();
+                const modifiers = ev.get_state();
+
+                // Cleanup
+                isPressed = false;
+                isDragging = false;
+                popup._isDragging = false;
+
+                // Re-enable the event blocker
+                if (popup._eventBlocker) popup._eventBlocker.reactive = true;
+
+                if (capturedEventId) {
+                    global.stage.disconnect(capturedEventId);
+                    capturedEventId = null;
+                }
+
+                if (dragClone) {
+                    dragClone.destroy();
+                    dragClone = null;
+                }
+
+                itemContainer.set_opacity(255);
+
+                if (wasDragging) {
+                    // If released close to where the drag started, cancel the drag
+                    const snapBackDist = Math.sqrt(
+                        (releaseX - pressX) ** 2 + (releaseY - pressY) ** 2
+                    );
+                    if (snapBackDist < 30) {
+                        // Snap-back cancel — user dragged back to origin
+                        return Clutter.EVENT_STOP;
+                    }
+
+                    // Perform the drop
+                    _handleFileDrop(data, releaseX, releaseY, modifiers);
+                    popup.close();
+                    return Clutter.EVENT_STOP; // Consume the release so it doesn't trigger a click
+                }
+
+                return Clutter.EVENT_PROPAGATE; // Let normal click through
+            }
+
+            return Clutter.EVENT_PROPAGATE;
+        });
+
+        return Clutter.EVENT_PROPAGATE; // Let St.Button handle its normal pressed state
+    });
+
+    // Safety: disconnect on destroy
+    itemContainer.connect('destroy', () => {
+        if (capturedEventId) {
+            global.stage.disconnect(capturedEventId);
+            capturedEventId = null;
+        }
+        if (dragClone) {
+            dragClone.destroy();
+            dragClone = null;
+        }
+    });
+}
+
+
 class StackPopup extends St.Widget {
     static {
         GObject.registerClass(this);
@@ -179,11 +506,10 @@ class StackPopup extends St.Widget {
 
             const labelWidget = new St.Label({
                 text: data.name,
-                y_align: Clutter.ActorAlign.CENTER
+                style_class: 'dash-label',
+                y_align: Clutter.ActorAlign.CENTER,
+                style: 'margin-right: 12px;' // Spacing from the icon
             });
-            // Mimic macOS translucent pill
-            // We removed box-shadow to prevent Wayland FBO freezes on label invalidations
-            labelWidget.set_style('background-color: rgba(0,0,0,0.5); color: white; border-radius: 12px; padding: 4px 12px; margin-right: 12px; border: 1px solid rgba(255,255,255,0.2); font-weight: bold;');
 
             const itemBox = new St.BoxLayout({
                 vertical: false,
@@ -203,6 +529,9 @@ class StackPopup extends St.Widget {
             });
 
             itemContainer._isFanOpened = false;
+
+            // Enable drag-and-drop for this fan item
+            _setupDragAction(itemContainer, data, this);
 
             // Handle hover zoom
             itemContainer.connect('notify::hover', () => {
@@ -254,6 +583,9 @@ class StackPopup extends St.Widget {
                 // The icon is roughly 64px wide and sits at the right edge
                 const pivotX = 1.0 - (32 / natW);
                 itemContainer.set_pivot_point(pivotX, 0.5);
+
+                // Forces Clutter to render the allocated actor to an offscreen texture for flawless anti-aliased rotation
+                itemContainer.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);
 
                 // Align so the pivot point tracks the originX + curve
                 const destX = originX + xShift - natW + 32;
@@ -418,7 +750,8 @@ class GridPopup extends St.Widget {
         // We use BinLayout so the search entry floating on top of the scrollview!
         this._container = new St.Widget({
             layout_manager: new Clutter.BinLayout(),
-            style: 'background-color: rgba(30, 30, 30, 0.9); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); width: 480px; height: 600px;'
+            style: 'background-color: rgba(30, 30, 30, 0.9); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); width: 480px; height: 600px;',
+            opacity: 0 // Start invisible to prevent flash at (0,0) before idle_add positions it
         });
 
         // Search Entry for Filtering
@@ -638,6 +971,9 @@ class GridPopup extends St.Widget {
             });
 
             itemContainer._data = data; // Stash for filtering
+
+            // Enable drag-and-drop for this grid item
+            _setupDragAction(itemContainer, data, this);
             itemContainer.hoverTargetScale = 1.05;
             itemContainer.set_opacity(0); // Hide initially for cascade animation
 
@@ -684,6 +1020,9 @@ class GridPopup extends St.Widget {
                 const [cw, ch] = this._container.get_transformed_size();
 
                 if (x < cx || x > cx + cw || y < cy || y > cy + ch) {
+                    // Don't close if a drag is in progress
+                    if (this._isDragging) return Clutter.EVENT_PROPAGATE;
+
                     // Check if they clicked the source dock icon. If so, let its 'clicked' handler do the toggling!
                     if (this.sourceIcon && this.sourceIcon.button) {
                         const [sx, sy] = this.sourceIcon.button.get_transformed_position();
@@ -1148,9 +1487,47 @@ export default class DockStacksExtension extends Extension {
         console.log(`[Dock Stacks] Enabling extension...`);
         this._settings = this.getSettings('org.gnome.shell.extensions.dock-stacks');
         this._stackIcons = [];
-        this._dashBox = Main.overview.dash._box; // Target dash container
+        this._dashBox = null;
+        this._enableRetryId = null;
 
-        this._syncStacks();
+        // The dash may not be ready immediately at login.
+        // Retry up to 20 times (10 seconds) until we can find _box.
+        let retries = 0;
+        const tryInit = () => {
+            try {
+                const box = Main.overview.dash._box;
+                if (box) this._dashBox = box;
+            } catch (e) {
+                this._dashBox = null;
+            }
+
+            if (this._dashBox) {
+                console.log(`[Dock Stacks] Dash box found (attempt ${retries + 1}), syncing stacks.`);
+                this._enableRetryId = null;
+                this._syncStacks();
+                return false; // Stop GLib timer (GLib.SOURCE_REMOVE = false)
+            }
+
+            retries++;
+            if (retries >= 20) {
+                console.error(`[Dock Stacks] Could not find dash box after 20 attempts. Extension inactive.`);
+                this._enableRetryId = null;
+                return false;
+            }
+
+            return true; // Keep retrying (GLib.SOURCE_CONTINUE = true)
+        };
+
+        // Try immediately. If not found, set up a retry timer.
+        const foundImmediately = (this._dashBox !== null);
+        if (!foundImmediately) {
+            tryInit(); // First attempt
+        }
+
+        if (!this._dashBox) {
+            // Dash not found yet, schedule retries every 500ms
+            this._enableRetryId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, tryInit);
+        }
 
         this._settingsChangedId = this._settings.connect('changed::configured-folders', () => {
             this._syncStacks();
@@ -1189,6 +1566,11 @@ export default class DockStacksExtension extends Extension {
 
     disable() {
         console.log(`[Dock Stacks] Disabling extension...`);
+
+        if (this._enableRetryId) {
+            GLib.source_remove(this._enableRetryId);
+            this._enableRetryId = null;
+        }
 
         if (this._settingsChangedId) {
             this._settings.disconnect(this._settingsChangedId);
