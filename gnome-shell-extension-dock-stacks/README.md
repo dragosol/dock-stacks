@@ -62,7 +62,7 @@ gnome-extensions prefs dock-stacks@dragosr
 
 If you find Dock Stacks useful, consider supporting development:
 
-[![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/donate?business=alexrobu.mac%40gmail.com&currency_code=CAD)
+[![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/helloitsalexr)
 
 ## License
 
