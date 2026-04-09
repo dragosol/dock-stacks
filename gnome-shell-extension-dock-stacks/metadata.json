@@ -4,5 +4,5 @@
   "description": "macOS-style stacks for the GNOME Dash",
   "shell-version": ["49", "50"],
   "settings-schema": "org.gnome.shell.extensions.dock-stacks",
-  "url": ""
+  "url": "https://github.com/dragosol/dock-stacks"
 }
