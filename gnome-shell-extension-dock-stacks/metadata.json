@@ -2,7 +2,7 @@
   "uuid": "dock-stacks@dragosr",
   "name": "Dock Stacks",
   "description": "macOS-style stacks for the GNOME Dash",
-  "version": 1,
+  "version": 2,
   "shell-version": ["49", "50"],
   "settings-schema": "org.gnome.shell.extensions.dock-stacks",
   "url": "https://github.com/dragosol/dock-stacks"

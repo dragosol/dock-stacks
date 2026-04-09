@@ -186,11 +186,13 @@ function _handleFileDrop(data, dropX, dropY, modifiers) {
         return;
     }
 
-    // Non-Nautilus app -> copy file path to clipboard.
+    // Non-Nautilus app -> open with default handler.
     // True Wayland cross-process DnD from the compositor is not possible.
-    const clipboard = St.Clipboard.get_default();
-    const filePath = sourceFile.get_path();
-    clipboard.set_text(St.ClipboardType.CLIPBOARD, filePath);
+    try {
+        Gio.AppInfo.launch_default_for_uri(data.uri, null);
+    } catch (e) {
+        console.error(`[Dock Stacks] Failed to open ${data.name}: ${e}`);
+    }
 }
 
 /**
