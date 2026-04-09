@@ -2,12 +2,16 @@
 
 macOS-style stacks for the GNOME Dash. Pin any folder to your dock and browse its contents in a fan or grid overlay — no file manager needed.
 
-![Dock Stacks in action](screenshot.png)
+| Fan mode | Grid mode |
+|----------|-----------|
+| ![Fan mode](screenshot.png) | ![Grid mode](screenshot-grid.png) |
 
 ## Features
 
-- **Fan and grid layouts** — small folders fan out elegantly; larger ones switch to a scrollable grid
-- **Drag and drop** — drag files out of stacks onto your desktop or Nautilus (other apps are not currently supported due to GNOME Shell limitations)
+- **Fan and grid layouts** — small folders fan out elegantly; larger ones switch to a searchable, scrollable grid
+- **Search** — type to filter in grid mode to quickly find files
+- **Quick Look** — press Spacebar to preview any file with GNOME Sushi, works in both fan and grid mode
+- **Drag and drop** — drag files to the desktop or into Nautilus windows; dropping onto other apps copies the file path to clipboard
 - **Live previews** — image and video thumbnails render inline
 - **Configurable** — choose folders to pin, set fan/grid thresholds, and more via the preferences panel
 - **Lightweight** — no background processes, purely a GNOME Shell extension
