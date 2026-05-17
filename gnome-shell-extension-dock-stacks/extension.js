@@ -1598,13 +1598,13 @@ class StackIconContainer extends St.Widget {
 
         const useGrid = gridMode === 'always' || (gridMode === 'auto' && items.length > threshold);
 
+        // Oldest -> newest
+        items.sort((a, b) => a.modified - b.modified);
+
         if (!useGrid && items.length > threshold) {
             // Fan caps at threshold; drop oldest (start of array)
             items.splice(0, items.length - threshold);
         }
-
-        // Oldest -> newest
-        items.sort((a, b) => a.modified - b.modified);
 
         const openInFilesObj = {
             name: 'Open in Files',
