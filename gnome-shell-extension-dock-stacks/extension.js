@@ -6,6 +6,8 @@ import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Dash from 'resource:///org/gnome/shell/ui/dash.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // ─── GObject Lifetime Helpers ───────────────────────────────────────────────
@@ -193,6 +195,131 @@ function _handleFileDrop(data, dropX, dropY, modifiers) {
     } catch (e) {
         console.error(`[Dock Stacks] Failed to open ${data.name}: ${e}`);
     }
+}
+
+/**
+ * Trigger the GNOME "Open With" dialog for a file
+ */
+function _openWith(uri) {
+    try {
+        const connection = Gio.DBus.session;
+
+        // For local files, use OpenFile with a file descriptor
+        if (uri.startsWith('file://')) {
+            try {
+                const file = Gio.File.new_for_uri(uri);
+                const inputStream = file.read(null);
+
+                if (inputStream && typeof inputStream.get_fd === 'function') {
+                    const fd = inputStream.get_fd();
+                    const fdList = new Gio.UnixFDList();
+                    fdList.append(fd);
+
+                    connection.call_with_unix_fd_list(
+                        'org.freedesktop.portal.Desktop',
+                        '/org/freedesktop/portal/desktop',
+                        'org.freedesktop.portal.OpenURI',
+                        'OpenFile',
+                        new GLib.Variant('(sha{sv})', [
+                            '',
+                            0, // Index in fdList
+                            {
+                                'ask': new GLib.Variant('b', true)
+                            }
+                        ]),
+                        new GLib.VariantType('(o)'),
+                        Gio.DBusCallFlags.NONE,
+                        -1,
+                        fdList,
+                        null,
+                        (conn, res) => {
+                            try {
+                                const [result] = conn.call_with_unix_fd_list_finish(res);
+                            } catch (e) {
+                                console.error(`[Dock Stacks] OpenFile failed: ${e}`);
+                            }
+                            inputStream.close(null);
+                        }
+                    );
+                    return;
+                }
+            } catch (e) {
+                console.warn(`[Dock Stacks] OpenFile preparation failed: ${e}`);
+            }
+        }
+    } catch (e) {
+        console.error(`[Dock Stacks] Failed to call OpenFile: ${e}`);
+    }
+}
+
+/**
+ * Show a file in Nautilus and select it.
+ */
+function _showInFiles(uri) {
+    try {
+        const connection = Gio.DBus.session;
+        connection.call(
+            'org.freedesktop.FileManager1',
+            '/org/freedesktop/FileManager1',
+            'org.freedesktop.FileManager1',
+            'ShowItems',
+            new GLib.Variant('(ass)', [[uri], '']),
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null,
+            (conn, res) => {
+                try {
+                    conn.call_finish(res);
+                } catch (e) {
+                    console.error(`[Dock Stacks] ShowItems failed: ${e}`);
+                }
+            }
+        );
+    } catch (e) {
+        console.error(`[Dock Stacks] Failed to call ShowItems: ${e}`);
+    }
+}
+
+/**
+ * Show a context menu for a stack item.
+ */
+function _showContextMenu(actor, data, popup, x, y) {
+    if (data.isAction) return;
+
+    if (!popup._menuManager) {
+        popup._menuManager = new PopupMenu.PopupMenuManager(popup);
+    }
+
+    // Use a dummy actor at the click position for precise alignment
+    const dummy = new St.Widget({
+        x, y,
+        width: 0,
+        height: 0,
+        opacity: 0,
+        reactive: false
+    });
+    Main.uiGroup.add_child(dummy);
+
+    const menu = new PopupMenu.PopupMenu(dummy, 0, St.Side.BOTTOM);
+    menu.addAction('Open With', () => {
+        _openWith(data.uri);
+        popup.close();
+    });
+
+    menu.addAction('Show in Files', () => {
+        popup.close();
+        _showInFiles(data.uri);
+    });
+
+    popup._menuManager.addMenu(menu);
+    Main.uiGroup.add_child(menu.actor);
+    menu.open(BoxPointer.PopupAnimation.FADE);
+
+    menu.connect('menu-closed', () => {
+        menu.destroy();
+        dummy.destroy();
+    });
 }
 
 /**
@@ -514,6 +641,15 @@ class StackPopup extends St.Widget {
             itemContainer._isFanOpened = false;
 
             _setupDragAction(itemContainer, data, this);
+
+            itemContainer.connect('button-press-event', (actor, event) => {
+                if (event.get_button() === 3) {
+                    const [x, y] = event.get_coords();
+                    _showContextMenu(itemContainer, data, this, x, y);
+                    return Clutter.EVENT_STOP;
+                }
+                return Clutter.EVENT_PROPAGATE;
+            });
 
             itemContainer.connect('notify::hover', () => {
                 if (!itemContainer._isFanOpened) return;
@@ -979,6 +1115,16 @@ class GridPopup extends St.Widget {
             itemContainer._data = data;
 
             _setupDragAction(itemContainer, data, this);
+
+            itemContainer.connect('button-press-event', (actor, event) => {
+                if (event.get_button() === 3) {
+                    const [x, y] = event.get_coords();
+                    _showContextMenu(itemContainer, data, this, x, y);
+                    return Clutter.EVENT_STOP;
+                }
+                return Clutter.EVENT_PROPAGATE;
+            });
+
             itemContainer.hoverTargetScale = 1.05;
             itemContainer.set_opacity(0);
 
