@@ -6,6 +6,8 @@ import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Dash from 'resource:///org/gnome/shell/ui/dash.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // ─── GObject Lifetime Helpers ───────────────────────────────────────────────
@@ -193,6 +195,159 @@ function _handleFileDrop(data, dropX, dropY, modifiers) {
     } catch (e) {
         console.error(`[Dock Stacks] Failed to open ${data.name}: ${e}`);
     }
+}
+
+/**
+ * Trigger the GNOME "Open With" dialog for a file
+ */
+function _openWith(uri) {
+    try {
+        const connection = Gio.DBus.session;
+
+        // For local files, use OpenFile with a file descriptor
+        if (uri.startsWith('file://')) {
+            try {
+                const file = Gio.File.new_for_uri(uri);
+                const inputStream = file.read(null);
+
+                if (inputStream && typeof inputStream.get_fd === 'function') {
+                    const fd = inputStream.get_fd();
+                    const fdList = new Gio.UnixFDList();
+                    fdList.append(fd);
+
+                    connection.call_with_unix_fd_list(
+                        'org.freedesktop.portal.Desktop',
+                        '/org/freedesktop/portal/desktop',
+                        'org.freedesktop.portal.OpenURI',
+                        'OpenFile',
+                        new GLib.Variant('(sha{sv})', [
+                            '',
+                            0, // Index in fdList
+                            {
+                                'ask': new GLib.Variant('b', true)
+                            }
+                        ]),
+                        new GLib.VariantType('(o)'),
+                        Gio.DBusCallFlags.NONE,
+                        -1,
+                        fdList,
+                        null,
+                        (conn, res) => {
+                            try {
+                                const [result] = conn.call_with_unix_fd_list_finish(res);
+                            } catch (e) {
+                                console.error(`[Dock Stacks] OpenFile failed: ${e}`);
+                            }
+                            inputStream.close(null);
+                        }
+                    );
+                    return;
+                }
+            } catch (e) {
+                console.warn(`[Dock Stacks] OpenFile preparation failed: ${e}`);
+            }
+        }
+    } catch (e) {
+        console.error(`[Dock Stacks] Failed to call OpenFile: ${e}`);
+    }
+}
+
+/**
+ * Show a file in Nautilus and select it.
+ */
+function _showInFiles(uri) {
+    try {
+        const connection = Gio.DBus.session;
+        connection.call(
+            'org.freedesktop.FileManager1',
+            '/org/freedesktop/FileManager1',
+            'org.freedesktop.FileManager1',
+            'ShowItems',
+            new GLib.Variant('(ass)', [[uri], '']),
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null,
+            (conn, res) => {
+                try {
+                    conn.call_finish(res);
+                } catch (e) {
+                    console.error(`[Dock Stacks] ShowItems failed: ${e}`);
+                }
+            }
+        );
+    } catch (e) {
+        console.error(`[Dock Stacks] Failed to call ShowItems: ${e}`);
+    }
+}
+
+/**
+ * Move a file to trash.
+ */
+function _moveToTrash(uri, onComplete) {
+    try {
+        const file = Gio.File.new_for_uri(uri);
+        file.trash_async(GLib.PRIORITY_DEFAULT, null, (sourceFile, res) => {
+            try {
+                sourceFile.trash_finish(res);
+                if (onComplete) onComplete(true);
+            } catch (e) {
+                console.error(`[Dock Stacks] Failed to move to trash: ${e}`);
+                if (onComplete) onComplete(false);
+            }
+        });
+    } catch (e) {
+        console.error(`[Dock Stacks] Failed to move to trash: ${e}`);
+        if (onComplete) onComplete(false);
+    }
+}
+
+/**
+ * Show a context menu for a stack item.
+ */
+function _showContextMenu(actor, data, popup, x, y) {
+    if (data.isAction) return;
+
+    if (!popup._menuManager) {
+        popup._menuManager = new PopupMenu.PopupMenuManager(popup);
+    }
+
+    // Use a dummy actor at the click position for precise alignment
+    const dummy = new St.Widget({
+        x, y,
+        width: 0,
+        height: 0,
+        opacity: 0,
+        reactive: false
+    });
+    Main.uiGroup.add_child(dummy);
+
+    const menu = new PopupMenu.PopupMenu(dummy, 0, St.Side.BOTTOM);
+    menu.addAction('Open With', () => {
+        _openWith(data.uri);
+        popup.close();
+    });
+
+    menu.addAction('Show in Files', () => {
+        popup.close();
+        _showInFiles(data.uri);
+    });
+
+    menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+    menu.addAction('Move to Trash', () => {
+        popup.close();
+        _moveToTrash(data.uri);
+    });
+
+    popup._menuManager.addMenu(menu);
+    Main.uiGroup.add_child(menu.actor);
+    menu.open(BoxPointer.PopupAnimation.FADE);
+
+    menu.connect('menu-closed', () => {
+        menu.destroy();
+        dummy.destroy();
+    });
 }
 
 /**
@@ -515,6 +670,15 @@ class StackPopup extends St.Widget {
 
             _setupDragAction(itemContainer, data, this);
 
+            itemContainer.connect('button-press-event', (actor, event) => {
+                if (event.get_button() === 3) {
+                    const [x, y] = event.get_coords();
+                    _showContextMenu(itemContainer, data, this, x, y);
+                    return Clutter.EVENT_STOP;
+                }
+                return Clutter.EVENT_PROPAGATE;
+            });
+
             itemContainer.connect('notify::hover', () => {
                 if (!itemContainer._isFanOpened) return;
 
@@ -549,6 +713,7 @@ class StackPopup extends St.Widget {
             const destY = originY - ((index + 1) * (64 + gap));
 
             const idx = index;
+            itemContainer.set_opacity(0);
             this._fanContainer.add_child(itemContainer);
 
             GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
@@ -979,6 +1144,16 @@ class GridPopup extends St.Widget {
             itemContainer._data = data;
 
             _setupDragAction(itemContainer, data, this);
+
+            itemContainer.connect('button-press-event', (actor, event) => {
+                if (event.get_button() === 3) {
+                    const [x, y] = event.get_coords();
+                    _showContextMenu(itemContainer, data, this, x, y);
+                    return Clutter.EVENT_STOP;
+                }
+                return Clutter.EVENT_PROPAGATE;
+            });
+
             itemContainer.hoverTargetScale = 1.05;
             itemContainer.set_opacity(0);
 
@@ -1256,7 +1431,7 @@ class StackIconContainer extends St.Widget {
         return { isOpen: this._popup ? this._popup._isOpen : false };
     }
 
-    constructor(folderPath, settings) {
+    constructor(folderPath, settings, iconSize) {
         super({
             layout_manager: new Clutter.BinLayout(),
             style_class: 'dash-item-container',
@@ -1285,9 +1460,37 @@ class StackIconContainer extends St.Widget {
             style_class: 'overview-icon'
         });
 
+        let iconName = 'folder';
+        try {
+            const folderFile = Gio.File.new_for_path(this.folderPath);
+            const specialDirs = [
+                [GLib.UserDirectory.DIRECTORY_DOWNLOAD, 'folder-download'],
+                [GLib.UserDirectory.DIRECTORY_DOCUMENTS, 'folder-documents'],
+                [GLib.UserDirectory.DIRECTORY_MUSIC, 'folder-music'],
+                [GLib.UserDirectory.DIRECTORY_PICTURES, 'folder-pictures'],
+                [GLib.UserDirectory.DIRECTORY_VIDEOS, 'folder-videos'],
+                [GLib.UserDirectory.DIRECTORY_DESKTOP, 'user-desktop'],
+                [GLib.UserDirectory.DIRECTORY_TEMPLATES, 'folder-templates'],
+                [GLib.UserDirectory.DIRECTORY_PUBLIC_SHARE, 'folder-publicshare'],
+            ];
+
+            for (const [type, icon] of specialDirs) {
+                const path = GLib.get_user_special_dir(type);
+                if (path && folderFile.equal(Gio.File.new_for_path(path))) {
+                    iconName = icon;
+                    break;
+                }
+            }
+
+            if (iconName === 'folder' && folderFile.equal(Gio.File.new_for_path(GLib.get_home_dir())))
+                iconName = 'user-home';
+        } catch (e) {
+            console.error(`[Dock Stacks] Error determining folder icon: ${e}`);
+        }
+
         this.icon = new St.Icon({
-            gicon: new Gio.ThemedIcon({ name: 'folder' }),
-            icon_size: 48
+            gicon: new Gio.ThemedIcon({ name: iconName }),
+            icon_size: iconSize || 48
         });
 
         this._iconContainer.add_child(this.icon);
@@ -1337,7 +1540,7 @@ class StackIconContainer extends St.Widget {
         const file = Gio.File.new_for_path(this.folderPath);
         const items = [];
         try {
-            const enumerator = file.enumerate_children('standard::name,standard::icon,standard::type,standard::content-type,thumbnail::path,time::modified', Gio.FileQueryInfoFlags.NONE, null);
+            const enumerator = file.enumerate_children('standard::name,standard::is-hidden,standard::icon,standard::type,standard::content-type,thumbnail::path,time::modified', Gio.FileQueryInfoFlags.NONE, null);
             let info;
             let count = 0;
             // Cap at 500 to prevent pathological memory bloat
@@ -1395,13 +1598,13 @@ class StackIconContainer extends St.Widget {
 
         const useGrid = gridMode === 'always' || (gridMode === 'auto' && items.length > threshold);
 
+        // Oldest -> newest
+        items.sort((a, b) => a.modified - b.modified);
+
         if (!useGrid && items.length > threshold) {
             // Fan caps at threshold; drop oldest (start of array)
             items.splice(0, items.length - threshold);
         }
-
-        // Oldest -> newest
-        items.sort((a, b) => a.modified - b.modified);
 
         const openInFilesObj = {
             name: 'Open in Files',
@@ -1489,6 +1692,20 @@ export default class DockStacksExtension extends Extension {
         this._dashBox = null;
         this._enableRetryId = null;
 
+        this._dockSettings = null;
+        try {
+            // Read the Dash to Dock icon size setting
+            const schemaId = 'org.gnome.shell.extensions.dash-to-dock';
+            const schemaSource = Gio.SettingsSchemaSource.get_default();
+            if (schemaSource.lookup(schemaId, true)) {
+                this._dockSettings = new Gio.Settings({ schema_id: schemaId });
+                this._dockSettingsId = this._dockSettings.connect('changed::dash-max-icon-size', () => this._syncStacks());
+                this._dockSettingsFixedId = this._dockSettings.connect('changed::icon-size-fixed', () => this._syncStacks());
+            }
+        } catch (e) {
+            console.error('[Dock Stacks] Failed to initialize Ubuntu Dock settings:', e);
+        }
+
         // Wait for D2D and other dock extensions to finish layout init
         this._enableRetryId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
             this._enableRetryId = null;
@@ -1503,6 +1720,7 @@ export default class DockStacksExtension extends Extension {
                 }
 
                 if (this._dashBox) {
+                    this._setupDashListener();
                     this._syncStacks();
                     return false;
                 }
@@ -1570,10 +1788,28 @@ export default class DockStacksExtension extends Extension {
                 this._dashBox;
         } catch (_) {}
 
+        let iconSize = 48;
+        if (this._dockSettings) {
+            try {
+                iconSize = this._dockSettings.get_int('dash-max-icon-size');
+            } catch (e) {}
+        }
+
+        // Try to get actual size from dash if available
+        try {
+            const dash = Main.overview.dash;
+            if (dash) {
+                if (typeof dash.iconSize === 'number')
+                    iconSize = dash.iconSize;
+                else if (dash.dash && typeof dash.dash.iconSize === 'number')
+                    iconSize = dash.dash.iconSize;
+            }
+        } catch (e) {}
+
         const folders = this._settings.get_strv('configured-folders');
         for (const folder of folders) {
             try {
-                const stackIcon = new StackIconContainer(folder, this._settings);
+                const stackIcon = new StackIconContainer(folder, this._settings, iconSize);
                 this._stackIcons.push(stackIcon);
                 if (this._dashBox) {
                     this._dashBox.add_child(stackIcon);
@@ -1582,6 +1818,18 @@ export default class DockStacksExtension extends Extension {
                 console.error(`[Dock Stacks] Failed to add stack for ${folder}:`, e);
             }
         }
+    }
+
+    _setupDashListener() {
+        if (this._dashIconSizeChangedId) return;
+
+        try {
+            const dash = Main.overview.dash;
+            if (dash && dash.connect) {
+                // Dash to Dock emits icon-size-changed
+                this._dashIconSizeChangedId = dash.connect('icon-size-changed', () => this._syncStacks());
+            }
+        } catch (e) {}
     }
 
     _cleanStacks() {
@@ -1600,6 +1848,23 @@ export default class DockStacksExtension extends Extension {
     }
 
     disable() {
+        if (this._dashIconSizeChangedId) {
+            try {
+                const dash = Main.overview.dash;
+                if (dash && dash.disconnect)
+                    dash.disconnect(this._dashIconSizeChangedId);
+            } catch (e) {}
+            this._dashIconSizeChangedId = null;
+        }
+
+        if (this._dockSettings) {
+            if (this._dockSettingsId)
+                this._dockSettings.disconnect(this._dockSettingsId);
+            if (this._dockSettingsFixedId)
+                this._dockSettings.disconnect(this._dockSettingsFixedId);
+            this._dockSettings = null;
+        }
+
         if (this._enableRetryId) {
             GLib.source_remove(this._enableRetryId);
             this._enableRetryId = null;
