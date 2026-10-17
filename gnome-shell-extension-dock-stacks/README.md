@@ -20,7 +20,7 @@ macOS-style stacks for the GNOME Dash. Pin any folder to your dock and browse it
 
 ## Requirements
 
-- GNOME Shell 49 or 50
+- GNOME Shell 49, 50, or 51
 - Wayland or X11
 
 ## Installation

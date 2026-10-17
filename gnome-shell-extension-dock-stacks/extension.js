@@ -627,20 +627,25 @@ class StackPopup extends St.Widget {
             let iconWidget;
 
             if (data.isImage && data.imageUri) {
-                iconWidget = new St.Widget({
-                    style: `background-image: url("${data.imageUri}"); background-size: cover; background-position: center; border-radius: 4px; border: 3px solid #ffffff; width: 48px; height: 48px; margin: 0;`
+                iconWidget = new St.Icon({
+                    gicon: data.icon,
+                    icon_size: 42,
+                    style_class: 'stack-item-icon',
+                    y_align: Clutter.ActorAlign.CENTER
                 });
+                iconWidget.set_style('border: 3px solid #ffffff; border-radius: 4px; box-shadow: 0px 1px 5px rgba(0, 0, 0, 0.15);');
             } else {
                 iconWidget = new St.Icon({
                     gicon: data.icon,
                     icon_size: 48,
-                    style_class: 'stack-item-icon'
+                    style_class: 'stack-item-icon',
+                    y_align: Clutter.ActorAlign.CENTER
                 });
 
                 if (data.isAction)
-                    iconWidget.set_style('');
+                    iconWidget.set_style('icon-shadow: 0px 2px 8px rgba(0, 0, 0, 0.30)');
                 else
-                    iconWidget.set_style('border-radius: 4px;');
+                    iconWidget.set_style('icon-shadow: 0px 2px 8px rgba(0, 0, 0, 0.30); border-radius: 4px;');
             }
 
             const labelWidget = new St.Label({
@@ -651,7 +656,7 @@ class StackPopup extends St.Widget {
             });
 
             const itemBox = new St.BoxLayout({
-                vertical: false,
+                orientation: Clutter.Orientation.HORIZONTAL,
                 y_align: Clutter.ActorAlign.CENTER
             });
             itemBox.add_child(labelWidget);
@@ -930,7 +935,7 @@ class GridPopup extends St.Widget {
         });
 
         this._searchWrapper = new St.BoxLayout({
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
             y_expand: true,
             x_align: Clutter.ActorAlign.FILL,
@@ -959,7 +964,7 @@ class GridPopup extends St.Widget {
 
         // Wrapper to satisfy St.Scrollable interface in GNOME 47+
         this._scrollWrapper = new St.BoxLayout({
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: false,
             y_expand: false
         });
@@ -1093,10 +1098,16 @@ class GridPopup extends St.Widget {
 
             if (data.isImage && data.imageUri) {
                 const img = new St.Widget({
-                    style: `background-image: url("${data.imageUri}"); background-size: cover; background-position: center; border-radius: 4px; border: 3px solid #ffffff; width: 64px; height: 64px; margin: 0;`
+                    x_align: Clutter.ActorAlign.CENTER,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    style: `background-image: url("${data.imageUri}"); background-size: cover; background-position: center; border-radius: 4px; border: 3px solid #ffffff; width: 54px; height: 54px; margin: 0;`
                 });
                 iconWidget = new St.Bin({
                     child: img,
+                    width: 64,
+                    height: 64,
+                    x_align: Clutter.ActorAlign.CENTER,
+                    y_align: Clutter.ActorAlign.CENTER,
                     style: 'border-radius: 6px; padding: 0;'
                 });
             } else {
@@ -1112,7 +1123,7 @@ class GridPopup extends St.Widget {
                     iconWidget.set_style('border-radius: 4px;');
             }
 
-            const nameBox = new St.BoxLayout({ vertical: true });
+            const nameBox = new St.BoxLayout({ orientation: Clutter.Orientation.VERTICAL });
 
             const labelWidget = new St.Label({
                 text: data.name,
@@ -1125,7 +1136,7 @@ class GridPopup extends St.Widget {
             labelWidget.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
 
             const iconBox = new St.BoxLayout({
-                vertical: true,
+                orientation: Clutter.Orientation.VERTICAL,
                 x_align: Clutter.ActorAlign.CENTER,
                 y_align: Clutter.ActorAlign.START
             });
